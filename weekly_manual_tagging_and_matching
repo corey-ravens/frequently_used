@@ -1,0 +1,271 @@
+
+
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	
+
+	This program is to pull out the players you need to manually change the ncaa_gsis_ids for in CFF and to find the injuries you need to manually tag.
+
+	Run it each week on Tuesday - after all the games are in.
+
+	(1) CFF Player ID updates
+	(2) NFL injuries
+
+			    
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	USE AnalyticsDevelopment
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	(1)
+
+
+	CFF Player ID updates.
+
+	Join to BaneProductionAnalytics to find the ncaa_gsis_ids we are using for each player.  CFF sometimes has multiple gsis ids on the same player,
+	this step tries to remedy that.
+
+	Sometimes they have multiple player names for the same player, that's what the STUFF step is for. Put all version of a player's name into one variable,
+	then search that for his last name to help when figuring out which row to join him to in the players table.
+
+	Only do this for college - gsis ids are handled pretty well once guys are in the NFL.
+
+			    
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+
+	-- Check if #temp_all_players exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_all_players') IS NOT NULL
+		DROP TABLE #temp_all_players
+
+	SELECT DISTINCT player_id
+		,gsis_player_id
+	INTO #temp_all_players
+	FROM CFFUltimate.dbo.roster
+	WHERE gsis_player_id <> 0
+		AND gsis_player_id IS NOT NULL
+		AND player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+
+
+	INSERT INTO #temp_all_players
+	SELECT DISTINCT player_id
+		,gsis_player_id
+	FROM CFFUltimate.dbo.offense
+	WHERE gsis_player_id <> 0
+		AND gsis_player_id IS NOT NULL
+		AND player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+
+
+	INSERT INTO #temp_all_players
+	SELECT DISTINCT player_id
+		,gsis_player_id
+	FROM CFFUltimate.dbo.defense
+	WHERE gsis_player_id <> 0
+		AND gsis_player_id IS NOT NULL
+		AND player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+
+
+	INSERT INTO #temp_all_players
+	SELECT DISTINCT player_id
+		,gsis_player_id
+	FROM CFFUltimate.dbo.special
+	WHERE player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+
+
+	INSERT INTO #temp_all_players
+	SELECT DISTINCT player_id
+		,gsis_player_id
+	FROM CFFUltimate.dbo.all_blocking
+	WHERE gsis_player_id <> 0
+		AND gsis_player_id IS NOT NULL
+		AND player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+
+
+	-- Check if #temp_duplicate_players exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_duplicate_players') IS NOT NULL
+		DROP TABLE #temp_duplicate_players
+
+	SELECT player_id
+		,COUNT(DISTINCT gsis_player_id) AS gsis_id_count
+	INTO #temp_duplicate_players
+	FROM #temp_all_players
+	WHERE player_id NOT IN (SELECT pff_player_id FROM import_cff_player_id_matches)
+	GROUP BY player_id
+	HAVING COUNT(DISTINCT gsis_player_id) > 1
+
+
+	-- Check if #temp_duplicate_ids exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_duplicate_ids') IS NOT NULL
+		DROP TABLE #temp_duplicate_ids
+
+	SELECT DISTINCT ro.player_id
+		,gsis_player_id
+		,ro.player_name
+	INTO #temp_duplicate_ids
+	FROM CFFUltimate.dbo.roster ro
+	INNER JOIN #temp_duplicate_players dp
+		ON ro.player_id = dp.player_id
+
+
+	-- Check if #temp_player_matches exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_player_matches') IS NOT NULL
+		DROP TABLE #temp_player_matches
+
+	SELECT di.*
+		,pl.id AS bane_player_id
+		,pl.ncaa_gsis_id
+		,CONCAT(pl.goes_by,' ',pl.last_name) AS player
+		,CONCAT(',(',di.player_id,',',pl.ncaa_gsis_id,',',pl.id,')')
+	FROM #temp_duplicate_ids di
+	LEFT JOIN BaneProductionAnalytics.dbo.players pl
+		ON di.gsis_player_id = pl.ncaa_gsis_id
+		AND pl.ncaa_gsis_id <> 0
+		AND pl.is_deleted = 0
+	ORDER BY player_name
+		,pl.id
+
+
+--insert into import_cff_player_id_matches values
+
+
+/*
+
+-- Check if #temp_duplicate_ids_stuff_names exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_duplicate_ids_stuff_names') IS NOT NULL
+	DROP TABLE #temp_duplicate_ids_stuff_names
+
+	SELECT player_id
+		,gsis_player_id
+		,player_names = STUFF((SELECT ';  ' + player_name
+					FROM #temp_duplicate_ids r2
+					WHERE r1.player_id = r2.player_id
+					AND r1.gsis_player_id = r2.gsis_player_id
+					FOR XML PATH('')), 1, 1, '')
+	INTO #temp_duplicate_ids_stuff_names
+	FROM #temp_duplicate_ids r1
+	GROUP BY player_id
+		,gsis_player_id
+
+
+,ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY CASE WHEN CHARINDEX(pl.last_name,SUBSTRING(player_names,CHARINDEX(' ', player_names) + 1,LEN(player_names) - CHARINDEX(' ', player_names))) > 0 THEN -999 ELSE ISNULL(pl.id,9999999) END) AS player_match_order
+
+
+-- Check if #temp_cff_player_id_updates exists, if it does drop it
+IF OBJECT_ID('tempdb..#temp_cff_player_id_updates') IS NOT NULL
+	DROP TABLE #temp_cff_player_id_updates
+
+SELECT DISTINCT ro.player_id AS pff_player_id
+	,ma.ncaa_gsis_id
+INTO #temp_cff_player_id_updates
+FROM CFFUltimate.dbo.roster ro
+INNER JOIN #temp_player_matches ma
+	ON ro.player_id = ma.player_id
+	AND ma.player_match_order = 1
+
+*/
+
+
+
+	/*---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	(2)
+
+
+	NFL injuries.
+
+	Find all the injuries the nfl play description tagged along with the player id and play id so you can join it to pff tables in the injury loops.
+
+			    
+	----------------------------------------------------------------------------------------------------------------------------------------------------------------------*/
+	
+	DECLARE @current_season INT = (SELECT MAX(season) FROM [ProDB].[dbo].[Game])
+	
+	-- Check if #temp_games exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_games') IS NOT NULL
+		DROP TABLE #temp_games
+
+	SELECT *
+		,CASE WHEN LTRIM(RTRIM(UPPER(Season_Type))) = 'Pre' THEN 100 + [Week]
+		    WHEN LTRIM(RTRIM(UPPER(Season_Type))) = 'Reg' THEN 200 + [Week]
+			WHEN LTRIM(RTRIM(UPPER(Season_Type))) = 'Post' THEN 300 + [Week]
+		END AS week_adjusted
+	INTO #temp_games
+	FROM [ProDB].[dbo].[Game]
+	WHERE Season >= @current_season
+
+		
+	DECLARE @current_week INT = (SELECT MAX(week_adjusted) FROM #temp_games WHERE GameWeekBegin <= GETDATE())	
+		
+	DELETE FROM #temp_games
+	WHERE week_adjusted < @current_week
+	
+
+	-- Check if #temp_play_injuries_all_players exists, if it does drop it
+	IF OBJECT_ID('tempdb..#temp_play_injuries_all_players') IS NOT NULL
+		DROP TABLE #temp_play_injuries_all_players
+
+	SELECT pl.GameKey AS gsis_game_key
+		,pl.PlayID AS gsis_play_id
+		,pf.play_id AS pff_play_id
+		,PlayDescription
+		,pf.player_name
+		,pf.gsis_player_id AS nfl_player_id
+	INTO #temp_play_injuries_all_players
+	FROM ProDB.dbo.PlayList pl
+	INNER JOIN #temp_games ga
+		ON pl.GameKey = ga.GameKey
+	LEFT JOIN PFFUltimate.dbo.defense pf
+		ON pl.GameKey = pf.gsis_game_id
+		AND pl.PlayID = pf.gsis_play_id
+	WHERE PlayDescription LIKE '%injured%'
+
+
+	INSERT INTO #temp_play_injuries_all_players
+	SELECT pl.GameKey AS gsis_game_key
+		,pl.PlayID AS gsis_play_id
+		,pf.play_id AS pff_play_id
+		,PlayDescription
+		,pf.player_name
+		,pf.gsis_player_id AS nfl_player_id
+	FROM ProDB.dbo.PlayList pl
+	INNER JOIN #temp_games ga
+		ON pl.GameKey = ga.GameKey
+	LEFT JOIN PFFUltimate.dbo.offense pf
+		ON pl.GameKey = pf.gsis_game_id
+		AND pl.PlayID = pf.gsis_play_id
+	WHERE PlayDescription LIKE '%injured%'
+
+
+	INSERT INTO #temp_play_injuries_all_players
+	SELECT pl.GameKey AS gsis_game_key
+		,pl.PlayID AS gsis_play_id
+		,pf.play_id AS pff_play_id
+		,PlayDescription
+		,pf.player_name
+		,pf.gsis_player_id AS nfl_player_id
+	FROM ProDB.dbo.PlayList pl
+	INNER JOIN #temp_games ga
+		ON pl.GameKey = ga.GameKey
+	LEFT JOIN PFFUltimate.dbo.special pf
+		ON pl.GameKey = pf.gsis_game_id
+		AND pl.PlayID = pf.gsis_play_id
+	WHERE PlayDescription LIKE '%injured%'
+
+
+	SELECT *
+	FROM #temp_play_injuries_all_players
+	WHERE pff_play_id IS NOT NULL
+	ORDER BY gsis_game_key
+		,pff_play_id
+		,player_name
+
+
+insert into import_pro_player_play_injury_facts values
+(58836,1436,4425288,'(3:54) (Shotgun) M.Stafford pass incomplete short right to O.Beckham. LA-O.Beckham was injured during the play. He is Out.','Odell Beckham Jr.',41238)
+,(58836,2605,4425385,'(4:28) M.Stafford pass short right to V.Jefferson to LA 46 for -1 yards (L.Wilson). CIN-C.Awuzie was injured during the play.','Chidobe Awuzie',44872)
+,(58836,3002,4425417,'(11:55) (Shotgun) J.Burrow sacked at CIN 28 for -6 yards (V.Miller). CIN-J.Burrow was injured during the play.  PENALTY on CIN-I.Prince, Unnecessary Roughness, 14 yards, enforced between downs.','Joe Burrow',52409)
+,(58836,3265,4425440,'(6:50) (Shotgun) J.Mixon right end to CIN 40 for 4 yards (D.Williams). LA-E.Jones was injured during the play.','Ernest Jones',53532)
+
